@@ -28,9 +28,7 @@ app.use(express.json());
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
     console.error('錯誤：請在 .env 檔案中設定 GEMINI_API_KEY。');
-    // 注意: 在生產環境中，這裡可能不需要終止應用程式，而是提供一個友好的錯誤頁面
-    // 對於本地開發，終止有助於快速發現問題
-    // process.exit(1); // 終止應用程式
+    // 在生產環境中，這個錯誤會被記錄下來，但應用程式會繼續運行以服務其他不需要 API 金鑰的功能
 }
 
 // 初始化 Gemini AI 模型
@@ -57,13 +55,8 @@ const safetySettings = [
     },
 ];
 
-// --- 提供靜態檔案服務 ---
-// 注意：將您的資料夾名稱從 'PUBLIC' 改為小寫的 'public' 以遵循慣例。
-
-// --- 處理根路徑的 GET 請求，現在直接發送 index.html ---
-
 // =======================================================
-// === 新增：AI 核心模組 - 內容優化與標題生成輔助函數 ===
+// === AI 核心模組 - 內容優化與標題生成輔助函數 ===
 // =======================================================
 
 // 品牌名稱和公關詞彙列表
@@ -137,7 +130,7 @@ function removeDatesFromText(text) {
 function generateOptimizedTitles(rawTitle, content) {
     const cleanedTitle = removeDatesFromText(rawTitle);
     const cleanedContent = removeDatesFromText(content);
-    
+
     // 嘗試從內文提取數字和主體
     const numbers = cleanedContent.match(/\d+/g) || [];
     let mainEntity = cleanedContent.substring(0, 20).replace(/，|。|\s/g, '');
@@ -154,7 +147,7 @@ function generateOptimizedTitles(rawTitle, content) {
     if (cleanedTitle.length > 0) {
         standardTitle = cleanedTitle.substring(0, 25);
     }
-    
+
     return {
         藏標: clickbaitTitle.trim(),
         正統: standardTitle.trim(),
@@ -234,15 +227,14 @@ async function extractArticleContent(url) {
             'main p',
             '.post__text p',
             '#contents p',
-            '.paragraph p',
-            '.article-text p',
-            '.News_Body p'
+            'p' // 使用最廣泛的 p 標籤作為最後的備用
         ];
 
         for (const selector of selectors) {
             $(selector).each((i, elem) => {
                 const text = $(elem).text().trim();
-                if (text.length > 50 && !text.includes('版權所有') && !text.includes('未經授權') && !text.includes('廣告') && !text.includes('延伸閱讀')) {
+                // 增加更嚴格的內容過濾，避免抓取到廣告或導覽文字
+                if (text.length > 50 && !text.includes('版權所有') && !text.includes('未經授權') && !text.includes('廣告') && !text.includes('延伸閱讀') && !text.includes('相關文章') && !text.includes('點擊圖片放大')) {
                     articleText += text + '\n\n';
                 }
             });
@@ -255,10 +247,10 @@ async function extractArticleContent(url) {
             console.warn(`Initial extraction failed for ${url}, attempting broader search.`);
             let bodyText = $('body').text();
             bodyText = bodyText.replace(/\s{2,}/g, '\n').replace(/\t/g, '').trim();
-            bodyText = bodyText.split('\n').filter(line => 
-                line.length > 30 && 
-                !line.includes('版權所有') && 
-                !line.includes('未經授權') && 
+            bodyText = bodyText.split('\n').filter(line =>
+                line.length > 30 &&
+                !line.includes('版權所有') &&
+                !line.includes('未經授權') &&
                 !line.includes('廣告') &&
                 !line.includes('延伸閱讀') &&
                 !line.includes('相關新聞') &&
@@ -270,11 +262,11 @@ async function extractArticleContent(url) {
                 !line.includes('搜尋') &&
                 !line.includes('首頁')
             ).join('\n\n');
-            
-            articleText = bodyText.substring(0, Math.min(bodyText.length, 2000)); 
+
+            articleText = bodyText.substring(0, Math.min(bodyText.length, 2000));
             console.warn(`Fallback extraction result length for ${url}: ${articleText.length}`);
         }
-        
+
         console.log(`Final extracted article content length for ${url}: ${articleText.length}`);
 
         return { content: articleText.trim(), siteName: siteName, rawTitle: rawTitle };
@@ -581,6 +573,8 @@ ${content}
         const filteredContent = filterBrands(aiOutput.content);
         const rewrittenContent = removePRContent(filteredContent);
         const finalContent = simpleRewrite(rewrittenContent);
+        const titles = generateOptimizedTitles(title || finalContent.substring(0, 30), finalContent);
+
 
         res.json({
             content: {
@@ -719,6 +713,7 @@ app.post('/generate-news-from-youtube', async (req, res) => {
         const finalContent = simpleRewrite(rewrittenContent);
         const titles = generateOptimizedTitles(aiOutput.longTitles[0] || finalContent.substring(0, 30), finalContent);
 
+
         res.json({
             content: {
                 newsContent: finalContent,
@@ -759,7 +754,7 @@ app.post('/proofread-text', async (req, res) => {
         // --- 新增：生成標題 ---
         const titles = generateOptimizedTitles("錯字校正", correctedText);
 
-        res.json({ 
+        res.json({
             content: {
                 correctedText: correctedText,
                 optimizedTitles: titles
@@ -778,9 +773,8 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: '伺服器內部錯誤，請稍後再試。' });
 });
 
-
 // 啟動伺服器
 app.listen(port, () => {
     console.log(`後端伺服器運行在 http://localhost:${port}`);
-    console.log(`現在可以打開 http://localhost:${port}/ 來使用網頁。`);
+    // 提醒：在 Render 上，這個網址是你的後端 API URL，而不是前端網頁的 URL。
 });
