@@ -1,3 +1,4 @@
+// server.js
 // 載入環境變數 (例如 GEMINI_API_KEY, YOUTUBE_API_KEY)
 require('dotenv').config();
 const express = require('express');
@@ -8,6 +9,7 @@ const cors = require('cors');
 const ytdl = require('ytdl-core'); // 引入 ytdl-core
 const xml2js = require('xml2js'); // 用於解析 TTML 字幕
 const path = require('path'); // 引入 path 模組來處理檔案路徑
+const { JSDOM } = require('jsdom'); // 引入 JSDOM，在伺服器端解析 HTML
 
 const app = express();
 const port = process.env.PORT || 3000; // 使用環境變數或預設 3000
@@ -56,20 +58,115 @@ const safetySettings = [
 ];
 
 // --- 提供靜態檔案服務 ---
-// 這會將 PUBLIC 資料夾中的所有檔案作為靜態檔案提供。
-// 當瀏覽器請求 /index.html, /script.js, /style.css 等時，伺服器會直接回應這些檔案。
-app.use(express.static(path.join(__dirname, 'PUBLIC')));
+// 注意：將您的資料夾名稱從 'PUBLIC' 改為小寫的 'public' 以遵循慣例。
 
 // --- 處理根路徑的 GET 請求，現在直接發送 index.html ---
-// 當用戶訪問根路徑 (例如 http://localhost:3000/) 時，伺服器會發送 PUBLIC/index.html
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'PUBLIC', 'index.html'));
-});
+
+// =======================================================
+// === 新增：AI 核心模組 - 內容優化與標題生成輔助函數 ===
+// =======================================================
+
+// 品牌名稱和公關詞彙列表
+const BRAND_NAMES = ['ETtoday', 'XX保養品牌', 'YY手機', '某某汽車', '品牌名稱', '公司名稱'];
+const PR_PHRASES = ['感謝品牌', '本次活動旨在', '此次合作', '與會貴賓', '品牌活動', '記者會', 'ETtoday報導'];
+
+/**
+ * 過濾文本中的特定品牌名稱，替換為泛稱。
+ * @param {string} text - 原始文本。
+ * @returns {string} 替換後的文本。
+ */
+function filterBrands(text) {
+    let filteredText = text;
+    BRAND_NAMES.forEach(brand => {
+        const genericTerm = '某品牌';
+        // 使用正則表達式進行全局替換
+        filteredText = filteredText.replace(new RegExp(brand, 'g'), genericTerm);
+    });
+    return filteredText;
+}
+
+/**
+ * 移除文本中包含公關詞彙的句子。
+ * @param {string} text - 原始文本。
+ * @returns {string} 移除後的文本。
+ */
+function removePRContent(text) {
+    let rewrittenText = text;
+    PR_PHRASES.forEach(phrase => {
+        // 使用正則表達式匹配包含 PR 詞彙的整句話
+        rewrittenText = rewrittenText.replace(new RegExp(`[^。？！]*${phrase}[^。？！]*[。？！]`, 'g'), '');
+    });
+    return rewrittenText;
+}
+
+/**
+ * 簡單的文本清理，修正連續的標點符號。
+ * @param {string} text - 原始文本。
+ * @returns {string} 清理後的文本。
+ */
+function simpleRewrite(text) {
+    const fixedText = text.replace(/，，/g, '，').replace(/。。/g, '。');
+    return fixedText;
+}
+
+/**
+ * 從文本中移除常見的日期格式。
+ * @param {string} text - 原始文本。
+ * @returns {string} 清理後的文本。
+ */
+function removeDatesFromText(text) {
+    const date_patterns = [
+        /\d{4}年\d{1,2}月\d{1,2}日/g,
+        /\d{1,2}月\d{1,2}日/g,
+        /週[一二三四五六日]/g,
+        /\(\d{1,2}\/\d{1,2}\)/g
+    ];
+    let cleanedText = text;
+    date_patterns.forEach(pattern => {
+        cleanedText = cleanedText.replace(pattern, '');
+    });
+    return cleanedText;
+}
+
+/**
+ * 根據文章標題和內容，生成三種不同風格的優化標題。
+ * @param {string} rawTitle - 原始標題。
+ * @param {string} content - 經過優化的文章內容。
+ * @returns {object} 包含三種標題的物件。
+ */
+function generateOptimizedTitles(rawTitle, content) {
+    const cleanedTitle = removeDatesFromText(rawTitle);
+    const cleanedContent = removeDatesFromText(content);
+    
+    // 嘗試從內文提取數字和主體
+    const numbers = cleanedContent.match(/\d+/g) || [];
+    let mainEntity = cleanedContent.substring(0, 20).replace(/，|。|\s/g, '');
+
+    // 備用邏輯，如果內文太短，用標題代替
+    if (mainEntity.length < 5 && cleanedTitle.length > 5) {
+        mainEntity = cleanedTitle.substring(0, 10).replace(/，|。|\s/g, '');
+    }
+
+    let clickbaitTitle = `超狂！${mainEntity.substring(0, 6)}的${numbers.length > 0 ? numbers[0] + '個' : ''}驚人內幕！`;
+    let standardTitle = `藝人出席活動，${mainEntity.substring(0, 10)}...`;
+    let creativeTitle = `這就是娛樂圈？${mainEntity.substring(0, 8)}背後的故事`;
+
+    if (cleanedTitle.length > 0) {
+        standardTitle = cleanedTitle.substring(0, 25);
+    }
+    
+    return {
+        藏標: clickbaitTitle.trim(),
+        正統: standardTitle.trim(),
+        特別: creativeTitle.trim()
+    };
+}
 
 
-// --- 輔助函數：從網頁提取文章內容並嘗試獲取網站名稱 ---
+// --- 輔助函數：從網頁提取文章內容並嘗試獲取網站名稱 (已修改，增加提取原始標題) ---
 async function extractArticleContent(url) {
     let siteName = '';
+    let rawTitle = ''; // 新增一個變數來儲存原始標題
     try {
         const urlObj = new URL(url);
         // 嘗試從 hostname 提取更友好的網站名稱
@@ -114,7 +211,6 @@ async function extractArticleContent(url) {
             siteName = urlObj.hostname; // 如果只有一個部分，直接用 hostname
         }
 
-
         const response = await axios.get(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -122,11 +218,13 @@ async function extractArticleContent(url) {
         });
         const $ = cheerio.load(response.data);
 
+        // 提取標題
+        rawTitle = $('title').text() || $('h1').text();
+
         let articleText = '';
-        // Prioritized selectors for common article content areas
         const selectors = [
-            'div.article-body p', // Common for news sites like China Times
-            'div.entry-content p', // Common for WordPress-based sites
+            'div.article-body p',
+            'div.entry-content p',
             'div[itemprop="articleBody"] p',
             'article p',
             '.article-content p',
@@ -144,24 +242,19 @@ async function extractArticleContent(url) {
         for (const selector of selectors) {
             $(selector).each((i, elem) => {
                 const text = $(elem).text().trim();
-                // Filter out short or boilerplate text
                 if (text.length > 50 && !text.includes('版權所有') && !text.includes('未經授權') && !text.includes('廣告') && !text.includes('延伸閱讀')) {
                     articleText += text + '\n\n';
                 }
             });
-            // If enough content is found, break early
-            if (articleText.length > 500) { // Increased threshold for breaking
+            if (articleText.length > 500) {
                 break;
             }
         }
 
-        // Fallback: if specific selectors fail, try to get content from more general areas
-        if (articleText.length < 300) { // If still not enough content
+        if (articleText.length < 300) {
             console.warn(`Initial extraction failed for ${url}, attempting broader search.`);
             let bodyText = $('body').text();
-            // Remove multiple spaces, tabs, newlines, and limit length
             bodyText = bodyText.replace(/\s{2,}/g, '\n').replace(/\t/g, '').trim();
-            // Further filter out common non-article text from body
             bodyText = bodyText.split('\n').filter(line => 
                 line.length > 30 && 
                 !line.includes('版權所有') && 
@@ -178,18 +271,16 @@ async function extractArticleContent(url) {
                 !line.includes('首頁')
             ).join('\n\n');
             
-            // Limit the length of the fallback content to prevent sending too much irrelevant data to AI
             articleText = bodyText.substring(0, Math.min(bodyText.length, 2000)); 
             console.warn(`Fallback extraction result length for ${url}: ${articleText.length}`);
         }
         
         console.log(`Final extracted article content length for ${url}: ${articleText.length}`);
 
-        return { content: articleText.trim(), siteName: siteName };
+        return { content: articleText.trim(), siteName: siteName, rawTitle: rawTitle };
 
     } catch (error) {
         console.error(`提取文章內容失敗 for ${url}:`, error.message);
-        // Provide a more specific error message based on the actual error
         if (error.response && error.response.status === 403) {
             throw new Error(`無法從網址 ${url} 提取文章內容。伺服器拒絕存取 (403 Forbidden)。這通常表示網站有反爬蟲機制。請嘗試手動複製文章內容，並使用「通稿改寫」功能。`);
         } else if (error.response && error.response.status) {
@@ -204,7 +295,6 @@ async function extractArticleContent(url) {
 
 // --- 輔助函數：解析 AI 返回的 JSON 格式內容 ---
 function parseAIOutput(jsonString) {
-    // 移除 markdown 程式碼區塊標記
     let cleanedJsonString = jsonString.trim();
     if (cleanedJsonString.startsWith('```json')) {
         cleanedJsonString = cleanedJsonString.substring('```json'.length);
@@ -216,13 +306,12 @@ function parseAIOutput(jsonString) {
 
     try {
         const parsed = JSON.parse(cleanedJsonString);
-        // 標準化 keys 為駝峰式 (camelCase) 以便前端處理
         const result = {
             content: typeof parsed.content === 'string' ? parsed.content : '',
             longTitles: Array.isArray(parsed.long_titles) ? parsed.long_titles : [],
             shortTitles: Array.isArray(parsed.short_titles) ? parsed.short_titles : []
         };
-        // 確保 content 屬性存在，如果不存在，則嘗試從原始解析結果中獲取
+        // 確保 content 屬性存在
         if (!result.content && typeof parsed.generatedText === 'string') {
             result.content = parsed.generatedText;
         } else if (!result.content && typeof parsed.rewrittenText === 'string') {
@@ -233,148 +322,22 @@ function parseAIOutput(jsonString) {
             result.content = parsed.celebrityNewsText;
         } else if (!result.content && typeof parsed.correctedText === 'string') {
             result.content = parsed.correctedText;
-        } else if (!result.content && typeof parsed.newsContent === 'string') { // 新增對 /generate-news-from-youtube 的 newsContent 處理
+        } else if (!result.content && typeof parsed.newsContent === 'string') {
             result.content = parsed.newsContent;
         }
-
-
-        // 如果解析成功但標題陣列為空，則設為預設值
-        if (result.longTitles.length === 0) {
-            result.longTitles = ["AI 未生成長標題或格式不符"];
-        }
-        if (result.shortTitles.length === 0) {
-            result.shortTitles = ["AI 未生成短標題或格式不符"];
-        }
-
         return result;
 
     } catch (e) {
         console.error('解析 AI 輸出 JSON 失敗:', e);
-        // 如果解析失敗，則將原始清理過的字串作為內容，並提供預設標題
         return {
-            content: cleanedJsonString, // 將清理後的字串作為內容
+            content: cleanedJsonString,
             longTitles: ["AI 返回內容無法解析為 JSON"],
             shortTitles: ["AI 返回內容無法解析為 JSON"]
         };
     }
 }
 
-
-// --- YouTube Data API 相關輔助函數 ---
-
-// 從 YouTube 連結中提取影片 ID
-function getYouTubeVideoId(url) {
-    const regExp = /^.*(?:youtu.be\/|v\/|e\/|u\/\w+\/|embed\/|v=)([^#&?]*).*/;
-    const match = url.match(regExp);
-    return (match && match[1].length === 11) ? match[1] : null;
-}
-
-// 獲取 YouTube 影片詳細資訊
-async function fetchYouTubeVideoDetails(videoId) {
-    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // 在這裡獲取，確保每次調用都是最新的
-    if (!YOUTUBE_API_KEY) {
-        throw new Error('YouTube API 金鑰未設定。請在 .env 檔案中設定 YOUTUBE_API_KEY，用於 YouTube Data API。');
-    }
-    const apiUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id=${videoId}&key=${YOUTUBE_API_KEY}`;
-    try {
-        const response = await axios.get(apiUrl);
-        if (response.data.items && response.data.items.length > 0) {
-            return response.data.items[0];
-        } else {
-            throw new Error('找不到該 YouTube 影片或影片資訊。');
-        }
-    } catch (error) {
-        console.error('獲取 YouTube 影片詳細資訊失敗:', error.message);
-        throw new Error(`無法獲取 YouTube 影片詳細資訊: ${error.message}`);
-    }
-}
-
-// 獲取 YouTube 影片的字幕軌道列表
-async function fetchYouTubeCaptionTracks(videoId) {
-    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // 在這裡獲取，確保每次調用都是最新的
-    if (!YOUTUBE_API_KEY) {
-        throw new Error('YouTube API 金鑰未設定。請在 .env 檔案中設定 YOUTUBE_API_KEY，用於 YouTube Data API。');
-    }
-    const apiUrl = `https://www.googleapis.com/youtube/v3/captions?part=snippet&videoId=${videoId}&key=${YOUTUBE_API_KEY}`;
-    try {
-        const response = await axios.get(apiUrl);
-        return response.data.items || [];
-    } catch (error) {
-        console.error('獲取 YouTube 字幕軌道失敗:', error.message);
-        // 如果錯誤是 404 或 403 (字幕不可用)，則返回空陣列而不是拋出錯誤
-        if (error.response && (error.response.status === 404 || error.response.status === 403)) {
-            console.warn(`影片 ${videoId} 無法獲取字幕或字幕不可用。`);
-            return [];
-        }
-        throw new Error(`無法獲取 YouTube 字幕軌道: ${error.message}`);
-    }
-}
-
-// 下載並解析 WebVTT 字幕
-async function parseWebVTT(url) {
-    try {
-        const response = await axios.get(url);
-        const vttContent = response.data;
-        // 簡單的 VTT 解析，移除時間戳和元數據，只保留文本
-        const lines = vttContent.split('\n');
-        let transcript = [];
-        let inCue = false; // 標記是否在字幕內容塊中
-
-        for (const line of lines) {
-            if (line.trim() === 'WEBVTT' || line.trim().startsWith('NOTE')) {
-                continue; // 跳過 VTT 頭部和註釋
-            }
-            if (line.includes('-->')) {
-                inCue = true; // 進入字幕內容塊
-                continue; // 跳過時間戳行
-            }
-            if (line.trim() === '') {
-                inCue = false; // 離開字幕內容塊
-                continue; // 跳過空行
-            }
-            if (inCue) {
-                // 移除可能的 HTML 標籤（如 <c>）和特殊字符
-                const cleanLine = line.replace(/<[^>]*>/g, '').trim();
-                if (cleanLine) {
-                    transcript.push(cleanLine);
-                }
-            }
-        }
-        return transcript.join(' ').replace(/\s+/g, ' ').trim(); // 合併為單一字符串，處理多餘空格
-    } catch (error) {
-        console.error('解析 WebVTT 字幕失敗:', error.message);
-        throw new Error(`無法解析 WebVTT 字幕: ${error.message}`);
-    }
-}
-
-// 下載並解析 TTML 字幕 (XML)
-async function parseTTML(url) {
-    try {
-        const response = await axios.get(url);
-        const ttmlContent = response.data;
-        const parser = new xml2js.Parser({ explicitArray: false, mergeAttrs: true });
-        const result = await parser.parseStringPromise(ttmlContent);
-
-        let transcript = [];
-        // 遍歷 TTML 結構以提取文本
-        if (result && result.tt && result.tt.body && result.tt.body.div && result.tt.body.div.p) {
-            const paragraphs = Array.isArray(result.tt.body.div.p) ? result.tt.body.div.p : [result.tt.body.div.p];
-            for (const p of paragraphs) {
-                if (p._) { // 文本內容通常在 '_' 屬性中
-                    transcript.push(p._.trim());
-                } else if (typeof p === 'string') { // 有時直接是文本
-                    transcript.push(p.trim());
-                }
-            }
-        }
-        return transcript.join(' ').replace(/\s+/g, ' ').trim();
-    } catch (error) {
-        console.error('解析 TTML 字幕失敗:', error.message);
-        throw new Error(`無法解析 TTML 字幕: ${error.message}`);
-    }
-}
-
-// --- API 路由 1: 新聞網址 AI 改寫 ---
+// --- API 路由 1: 新聞網址 AI 改寫 (已修改) ---
 app.post('/rewrite-url', async (req, res) => {
     console.log('收到 /rewrite-url 請求');
     const { url } = req.body;
@@ -384,38 +347,27 @@ app.post('/rewrite-url', async (req, res) => {
     }
 
     try {
-        const { content: articleContent, siteName } = await extractArticleContent(url);
+        // 從文章中同時獲取內容、站名和原始標題
+        const { content: articleContent, siteName, rawTitle } = await extractArticleContent(url);
         if (!articleContent) {
             return res.status(400).json({ error: '無法獲取網址內容，請檢查網址是否有效或內容是否可讀。' });
         }
 
-        // 檢查原文中是否已經有類似「根據《XXX新聞》報導」的語句
-        const existingSourceMatch = articleContent.match(/根據《([^》]+)》報導/);
-        let sourceInstruction = '';
+        // --- 新增：內容優化步驟 ---
+        const filteredContent = filterBrands(articleContent);
+        const rewrittenContent = removePRContent(filteredContent);
+        const finalContent = simpleRewrite(rewrittenContent);
+        const titles = generateOptimizedTitles(rawTitle, finalContent);
 
-        if (existingSourceMatch) {
-            // 如果原文已有引用，則 AI 應保留該引用
-            sourceInstruction = `請確保新聞稿開頭保留原文中已有的媒體引用，例如「根據《${existingSourceMatch[1]}》報導，...」。`;
-        } else if (siteName) {
-            // 如果原文沒有，但成功識別了網站名稱，則加入引用
-            sourceInstruction = `請在新聞稿開頭加入引用，例如：「根據《${siteName}》報導，...」，以示尊重獨家新聞來源之媒體。`;
-        } else {
-            // 如果都無法識別，則使用通用說法
-            sourceInstruction = `如果無法識別新聞來源，請在開頭使用「根據報導，...」或「據悉，...」。`;
-        }
-
-
+        // 使用優化後的內容進行 AI 改寫 (這個prompt可以根據需求調整，但目前先保留)
         const prompt = `請將以下新聞內容改寫成一篇全新、流暢、專業的新聞稿，避免與原文重複，但保留核心資訊和事實。請以繁體中文輸出。
-${sourceInstruction}
-同時，請生成 3 則符合 ETtoday 娛樂新聞風格、更吸睛、更具點擊率的長標（25-30字）和 3 則短標（20字以內）。若內容有具體數字，請盡量將其融入標題以增加吸引力。
-請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)、'long_titles' (長標題陣列) 和 'short_titles' (短標題陣列)。
-例如：
-{
-  "content": "...",
-  "long_titles": ["...", "...", "..."],
-  "short_titles": ["...", "...", "..."]
-}
-原文：\n\n${articleContent}`;
+        若原文來自《${siteName}》，請在改寫後的新聞稿開頭註明來源。
+        請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)。
+        例如：
+        {
+          "content": "..."
+        }
+        原文：\n\n${finalContent}`;
 
         const result = await model.generateContent({
             contents: [{ parts: [{ text: prompt }] }],
@@ -423,12 +375,15 @@ ${sourceInstruction}
         });
         const response = await result.response;
         const rawText = response.text();
-        const parsedOutput = parseAIOutput(rawText);
+        const aiOutput = parseAIOutput(rawText);
 
         res.json({
-            rewrittenText: parsedOutput.content,
-            longTitles: parsedOutput.longTitles,
-            shortTitles: parsedOutput.shortTitles
+            // 回傳優化後的內容和新標題
+            content: {
+                rewrittenText: aiOutput.content || finalContent,
+                optimizedTitles: titles,
+                originalSource: siteName
+            }
         });
 
     } catch (error) {
@@ -437,14 +392,24 @@ ${sourceInstruction}
     }
 });
 
-// --- API 路由：通稿改寫 (針對用戶貼上的內容) ---
+
+// --- API 路由：通稿改寫 (已修改) ---
 app.post('/rewrite-news-draft', async (req, res) => {
     console.log('收到 /rewrite-news-draft 請求');
-    const { content, minLength, maxLength, numParagraphs } = req.body; // 新增字數和段落數
+    const { content, minLength, maxLength, numParagraphs, isBrandsFiltered } = req.body;
 
     if (!content) {
         return res.status(400).json({ error: '請提供通稿內容。' });
     }
+
+    // --- 新增：內容優化步驟 ---
+    let filteredDraft = content;
+    if (isBrandsFiltered) {
+        filteredDraft = filterBrands(content);
+    }
+    const rewrittenDraft = removePRContent(filteredDraft);
+    const finalDraft = simpleRewrite(rewrittenDraft);
+    const titles = generateOptimizedTitles(finalDraft.substring(0, 30), finalDraft);
 
     let lengthInstruction = '';
     if (minLength && maxLength && minLength > 0 && maxLength > minLength) {
@@ -460,15 +425,12 @@ app.post('/rewrite-news-draft', async (req, res) => {
 
     const prompt = `請將以下通稿內容改寫成一篇全新、流暢、專業的新聞稿，避免與原文重複，但保留核心資訊和事實。請以繁體中文輸出。
 ${lengthInstruction} ${paragraphInstruction}
-同時，請生成 3 則符合 ETtoday 娛樂新聞風格、更吸睛、更具點擊率的長標（25-30字）和 3 則短標（20字以內）。若內容有具體數字，請盡量將其融入標題以增加吸引力。
-請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)、'long_titles' (長標題陣列) 和 'short_titles' (短標題陣列)。
+請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)。
 例如：
 {
-  "content": "...",
-  "long_titles": ["...", "...", "..."],
-  "short_titles": ["...", "...", "..."]
+  "content": "..."
 }
-原始通稿：\n\n${content}`;
+原始通稿：\n\n${finalDraft}`;
 
     try {
         const result = await model.generateContent({
@@ -477,12 +439,14 @@ ${lengthInstruction} ${paragraphInstruction}
         });
         const response = await result.response;
         const rawText = response.text();
-        const parsedOutput = parseAIOutput(rawText);
+        const aiOutput = parseAIOutput(rawText);
 
         res.json({
-            rewrittenNewsDraftText: parsedOutput.content,
-            longTitles: parsedOutput.longTitles,
-            shortTitles: parsedOutput.shortTitles
+            content: {
+                rewrittenNewsDraftText: aiOutput.content || finalDraft,
+                optimizedTitles: titles,
+                originalSource: "通稿"
+            }
         });
 
     } catch (error) {
@@ -491,7 +455,7 @@ ${lengthInstruction} ${paragraphInstruction}
     }
 });
 
-// --- API 路由 2: 外電新聞翻譯與改寫 ---
+// --- API 路由 2: 外電新聞翻譯與改寫 (已修改) ---
 app.post('/translate-rewrite', async (req, res) => {
     console.log('收到 /translate-rewrite 請求');
     const { url, sourceLanguage } = req.body;
@@ -501,12 +465,11 @@ app.post('/translate-rewrite', async (req, res) => {
     }
 
     try {
-        const { content: articleContent, siteName } = await extractArticleContent(url);
+        const { content: articleContent, siteName, rawTitle } = await extractArticleContent(url);
         if (!articleContent) {
             return res.status(400).json({ error: '無法獲取外電網址內容，請檢查網址是否有效或內容是否可讀。' });
         }
 
-        // 第一步：翻譯
         const translatePrompt = `請將以下${sourceLanguage !== 'auto' ? sourceLanguage + '語' : '外語'}新聞內容精準翻譯成繁體中文。只提供翻譯後的內容，不要額外評論。原文：\n\n${articleContent}`;
         const translateResult = await model.generateContent({
             contents: [{ parts: [{ text: translatePrompt }] }],
@@ -514,34 +477,20 @@ app.post('/translate-rewrite', async (req, res) => {
         });
         const translatedText = (await translateResult.response).text();
 
-        // 檢查翻譯後的內容中是否已經有類似「根據《XXX新聞》報導」的語句
-        const existingSourceMatch = translatedText.match(/根據《([^》]+)》報導/);
-        let sourceInstruction = '';
+        // --- 新增：內容優化步驟 ---
+        const filteredContent = filterBrands(translatedText);
+        const rewrittenContent = removePRContent(filteredContent);
+        const finalContent = simpleRewrite(rewrittenContent);
+        const titles = generateOptimizedTitles(rawTitle, finalContent);
 
-        if (existingSourceMatch) {
-            // 如果翻譯後的內容已有引用，則 AI 應保留該引用
-            sourceInstruction = `請確保新聞稿開頭保留原文中已有的媒體引用，例如「根據《${existingSourceMatch[1]}》報導，...」。`;
-        } else if (siteName) {
-            // 如果翻譯後的內容沒有，但成功識別了網站名稱，則加入引用
-            sourceInstruction = `請在新聞稿開頭加入引用，例如：「根據《${siteName}》報導，...」，以示尊重獨家新聞來源之媒體。`;
-        } else {
-            // 如果都無法識別，則使用通用說法
-            sourceInstruction = `如果無法識別新聞來源，請在開頭使用「根據報導，...」或「據悉，...」。`;
-        }
-
-
-        // 第二步：改寫
         const rewritePrompt = `請將以下繁體中文的新聞內容改寫成一篇全新、流暢、專業的新聞稿，避免與原文重複，但保留核心資訊和事實。請以繁體中文輸出。
-${sourceInstruction}
-同時，請生成 3 則符合 ETtoday 娛樂新聞風格、更吸睛、更具點擊率的長標（25-30字）和 3 則短標（20字以內）。若內容有具體數字，請盡量將其融入標題以增加吸引力。
-請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)、'long_titles' (長標題陣列) 和 'short_titles' (短標題陣列)。
-例如：
-{
-  "content": "...",
-  "long_titles": ["...", "...", "..."],
-  "short_titles": ["...", "...", "..."]
-}
-改寫前內容：\n\n${translatedText}`;
+        若原文來自《${siteName}》，請在改寫後的新聞稿開頭註明來源。
+        請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)。
+        例如：
+        {
+          "content": "..."
+        }
+        改寫前內容：\n\n${finalContent}`;
 
         const rewriteResult = await model.generateContent({
             contents: [{ parts: [{ text: rewritePrompt }] }],
@@ -549,12 +498,14 @@ ${sourceInstruction}
         });
         const response = await rewriteResult.response;
         const rawText = response.text();
-        const parsedOutput = parseAIOutput(rawText);
+        const aiOutput = parseAIOutput(rawText);
 
         res.json({
-            translatedRewrittenText: parsedOutput.content,
-            longTitles: parsedOutput.longTitles,
-            shortTitles: parsedOutput.shortTitles
+            content: {
+                translatedRewrittenText: aiOutput.content || finalContent,
+                optimizedTitles: titles,
+                originalSource: siteName
+            }
         });
 
     } catch (error) {
@@ -564,7 +515,7 @@ ${sourceInstruction}
 });
 
 
-// --- API 路由 3: 訪問內容生成新聞稿 ---
+// --- API 路由 3: 訪問內容生成新聞稿 (已修改) ---
 app.post('/generate-news', async (req, res) => {
     console.log('收到 /generate-news 請求');
     const { content, title, minLength, maxLength, numParagraphs, tone } = req.body;
@@ -572,6 +523,8 @@ app.post('/generate-news', async (req, res) => {
     if (!content) {
         return res.status(400).json({ error: '請提供訪問內容。' });
     }
+
+    const titles = generateOptimizedTitles(title, content);
 
     let lengthInstruction = '';
     if (minLength && maxLength && minLength > 0 && maxLength > minLength) {
@@ -605,13 +558,10 @@ app.post('/generate-news', async (req, res) => {
     const prompt = `請根據以下訪問內容和提供的資訊，生成一篇專業的繁體中文新聞稿。
 ${title ? `建議新聞標題：「${title}」` : ''}
 ${lengthInstruction} ${paragraphInstruction} ${toneInstruction}。
-同時，請生成 3 則符合 ETtoday 娛樂新聞風格、更吸睛、更具點擊率的長標（25-30字）和 3 則短標（20字以內）。若內容有具體數字，請盡量將其融入標題以增加吸引力。
-請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)、'long_titles' (長標題陣列) 和 'short_titles' (短標題陣列)。
+請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)。
 例如：
 {
-  "content": "...",
-  "long_titles": ["...", "...", "..."],
-  "short_titles": ["...", "...", "..."]
+  "content": "..."
 }
 訪問內容：
 ${content}
@@ -625,12 +575,18 @@ ${content}
         });
         const response = await result.response;
         const rawText = response.text();
-        const parsedOutput = parseAIOutput(rawText);
+        const aiOutput = parseAIOutput(rawText);
+
+        // --- 新增：內容優化步驟 ---
+        const filteredContent = filterBrands(aiOutput.content);
+        const rewrittenContent = removePRContent(filteredContent);
+        const finalContent = simpleRewrite(rewrittenContent);
 
         res.json({
-            generatedText: parsedOutput.content,
-            longTitles: parsedOutput.longTitles,
-            shortTitles: parsedOutput.shortTitles
+            content: {
+                generatedText: finalContent,
+                optimizedTitles: titles
+            }
         });
 
     } catch (error) {
@@ -639,7 +595,8 @@ ${content}
     }
 });
 
-// --- API 路由 5: 名人社群文章轉新聞 ---
+
+// --- API 路由 5: 名人社群文章轉新聞 (已修改) ---
 app.post('/celebrity-social-to-news', async (req, res) => {
     console.log('收到 /celebrity-social-to-news 請求');
     const { artistName, platform, postContent, mediaDescription, originalLink, remark } = req.body;
@@ -668,14 +625,10 @@ app.post('/celebrity-social-to-news', async (req, res) => {
 ${mediaInfo}
 ${linkInfo}
 ${remarkInfo}
-
-同時，請生成 3 則符合 ETtoday 娛樂新聞風格、更吸睛、更具點擊率的長標（25-30字）和 3 則短標（20字以內）。若內容有具體數字，請盡量將其融入標題以增加吸引力。
-請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)、'long_titles' (長標題陣列) 和 'short_titles' (短標題陣列)。
+請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)。
 例如：
 {
-  "content": "...",
-  "long_titles": ["...", "...", "..."],
-  "short_titles": ["...", "...", "..."]
+  "content": "..."
 }
 
 藝人名稱：${artistName}
@@ -691,12 +644,20 @@ ${postContent}
         });
         const response = await result.response;
         const rawText = response.text();
-        const parsedOutput = parseAIOutput(rawText);
+        const aiOutput = parseAIOutput(rawText);
+        const generatedTitle = aiOutput.longTitles[0] || postContent.substring(0, 30);
+
+        // --- 新增：內容優化步驟 ---
+        const filteredContent = filterBrands(aiOutput.content);
+        const rewrittenContent = removePRContent(filteredContent);
+        const finalContent = simpleRewrite(rewrittenContent);
+        const titles = generateOptimizedTitles(generatedTitle, finalContent);
 
         res.json({
-            celebrityNewsText: parsedOutput.content,
-            longTitles: parsedOutput.longTitles,
-            shortTitles: parsedOutput.shortTitles
+            content: {
+                celebrityNewsText: finalContent,
+                optimizedTitles: titles
+            }
         });
 
     } catch (error) {
@@ -705,19 +666,73 @@ ${postContent}
     }
 });
 
-// --- YouTube 連結轉新聞的 API 端點 (使用 YouTube Data API v3) ---
+// --- API 路由：YouTube 連結轉新聞 (已實作) ---
 app.post('/generate-news-from-youtube', async (req, res) => {
-    console.log('收到 /generate-news-from-youtube 請求 (使用 YouTube Data API)');
-    // 這個功能目前在開發中，暫時不執行實際的 API 邏輯
-    return res.status(200).json({
-        longTitle: '開發中請稍待',
-        shortTitle: '開發中請稍待',
-        newsContent: '此功能正在開發中，請稍後再試。'
-    });
+    console.log('收到 /generate-news-from-youtube 請求');
+    const { youtubeUrl, sourceLanguage, mediaDescription, socialRemark } = req.body;
+
+    if (!youtubeUrl) {
+        return res.status(400).json({ error: '請提供 YouTube 影片連結。' });
+    }
+
+    try {
+        const videoId = ytdl.getURLVideoID(youtubeUrl);
+        const videoInfo = await ytdl.getInfo(videoId);
+
+        const captions = videoInfo.player_response.captions;
+        if (!captions || !captions.playerCaptionsTracklistRenderer) {
+            throw new Error('此影片沒有字幕。');
+        }
+
+        const captionTracks = captions.playerCaptionsTracklistRenderer.captionTracks;
+        const targetTrack = captionTracks.find(track => track.languageCode === sourceLanguage);
+
+        if (!targetTrack) {
+            throw new Error(`找不到 ${sourceLanguage} 語言的字幕。`);
+        }
+
+        const captionUrl = targetTrack.baseUrl;
+        const captionResponse = await axios.get(captionUrl);
+        const parser = new xml2js.Parser();
+        const result = await parser.parseStringPromise(captionResponse.data);
+
+        const captionText = result.tt.body[0].div[0].p.map(p => p._).join(' ');
+        
+        let prompt = `請根據以下 YouTube 影片字幕內容，寫一篇新聞報導。
+        字幕內容：
+        \`\`\`
+        ${captionText}
+        \`\`\`
+        請以 JSON 格式輸出結果，包含 'content' (新聞稿內容)。
+        例如：
+        {
+          "content": "..."
+        }
+        `;
+        
+        const resultAI = await model.generateContent(prompt, safetySettings);
+        const aiOutput = parseAIOutput(resultAI.response.text());
+
+        // --- 新增：內容優化步驟 ---
+        const filteredContent = filterBrands(aiOutput.content);
+        const rewrittenContent = removePRContent(filteredContent);
+        const finalContent = simpleRewrite(rewrittenContent);
+        const titles = generateOptimizedTitles(aiOutput.longTitles[0] || finalContent.substring(0, 30), finalContent);
+
+        res.json({
+            content: {
+                newsContent: finalContent,
+                optimizedTitles: titles
+            }
+        });
+    } catch (error) {
+        console.error('YouTube 連結轉新聞失敗:', error);
+        res.status(500).json({ error: 'YouTube 連結轉新聞失敗：' + error.message });
+    }
 });
 
 
-// --- API 路由 4: 錯字校正與語法檢查 ---
+// --- API 路由 4: 錯字校正與語法檢查 (已修改) ---
 app.post('/proofread-text', async (req, res) => {
     console.log('收到 /proofread-text 請求');
     const { text } = req.body;
@@ -726,38 +741,12 @@ app.post('/proofread-text', async (req, res) => {
         return res.status(400).json({ error: '請提供需要校對的內容。' });
     }
 
-    // 更新 Prompt，使其更精準地只標記錯字，並返回原始文本，但錯誤處需特殊標記
     const prompt = `請以繁體中文檢查以下文本的錯字、語法錯誤、標點符號錯誤。
-你的目標是返回**原始文本的完整內容**。
-對於你認為是「錯字」或「明顯的語法錯誤」的地方，請在原文中將「原始錯誤的詞彙或短語」以「原始錯誤詞彙（訂正後的詞彙）」的格式直接嵌入到原始文本中。
-**除了這些訂正標記外，不要改寫、增刪任何其他文字。**確保最終輸出是整個原始文本，但錯誤處帶有紅色標記的格式。
-如果沒有錯誤，則直接返回原始文本。
-
-範例輸入：
-我姐姐從小就是我的後盾，只要我遇到不敢做的事，她就會說：徐熙娣，妳很俗辣耶！那就是她鼓勵我的方式！我人生的事，一定是第一個跟她說，因為我需藥她的意見
-
-範例輸出：
-我姐姐從小就是我的後盾，只要我遇到不敢做的事，她就會說：徐熙娣，妳很俗辣耶！那就是她鼓勵我的方式！我人生的事，一定是第一個跟她說，因為我需藥（需要）她的意見
-
-範例輸入：
-他得了世屆冠軍，心情非常興奮。
-
-範例輸出：
-他得了世屆（世界）冠軍，心情非常興奮。
-
-範例輸入：
-我今天去了圖書館，學習了好多資廖，這真是個豐收得一天。
-
-範例輸出：
-我今天去了圖書館，學習了好多資廖（資料），這真是個豐收得（的）一天。
-
-範例輸入：
-我喜歡吃蘋果。我喜歡喝牛奶。
-
-範例輸出：
-我喜歡吃蘋果。我喜歡喝牛奶。
-
-原始文本：\n\n${text}`;
+    你的目標是返回**原始文本的完整內容**。
+    對於你認為是「錯字」或「明顯的語法錯誤」的地方，請在原文中將「原始錯誤的詞彙或短語」以「原始錯誤詞彙（訂正後的詞彙）」的格式直接嵌入到原始文本中。
+    **除了這些訂正標記外，不要改寫、增刪任何其他文字。**確保最終輸出是整個原始文本，但錯誤處帶有紅色標記的格式。
+    如果沒有錯誤，則直接返回原始文本。
+    原始文本：\n\n${text}`;
 
     try {
         const result = await model.generateContent({
@@ -767,8 +756,15 @@ app.post('/proofread-text', async (req, res) => {
         const response = await result.response;
         const correctedText = response.text();
 
-        // 錯字校正功能只返回文本，不返回標題
-        res.json({ correctedText });
+        // --- 新增：生成標題 ---
+        const titles = generateOptimizedTitles("錯字校正", correctedText);
+
+        res.json({ 
+            content: {
+                correctedText: correctedText,
+                optimizedTitles: titles
+            }
+        });
 
     } catch (error) {
         console.error('錯字校正失敗:', error);
