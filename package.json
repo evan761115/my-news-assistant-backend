@@ -20,7 +20,7 @@
     "firebase": "^10.12.3",
     "ytdl-core": "^4.11.5",
     "xml2js": "^0.6.2",
-    "jsdom": "^24.0.0" // 在這裡新增這一行
+    "jsdom": "^24.0.0" 
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
